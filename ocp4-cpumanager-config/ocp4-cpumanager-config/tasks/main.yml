@@ -1,0 +1,70 @@
+---
+# tasks file for ocp4-hugepages-config
+- block:
+  - name: Log in to OpenShift cluster to get auth token
+    k8s_auth:
+      username: "{{ k8s_username }}"
+      password: "{{ k8s_password }}"
+    register: k8s_auth_results
+    when: k8s_username is defined and k8s_password is defined
+
+  - name: Debug k8s auth
+    debug:
+      msg: "{{ k8s_auth_results }}"
+
+  - name: Login with token for the session
+    command: "oc login --token={{ k8s_auth_results.k8s_auth.api_key }} --server=https://api.{{ cluster_name }}.{{ public_domain }}:6443"
+
+  - block:
+    - name: Get available nodes
+      command: oc get nodes -o jsonpath='{.items..metadata.name}'
+      register: ocp_nodes_out
+
+    - name: Debug nodes results
+      debug:
+        msg: "{{ ocp_nodes_out }}"
+
+    - name: set nodes as fact
+      set_fact:
+        hp_ocp_nodes: "{{ ocp_nodes_out.stdout.split(' ') }}"
+    when: hp_ocp_nodes is not defined
+
+  - name: Debug nodes fact
+    debug:
+      msg: "{{ hp_ocp_nodes }}"
+
+  - name: Label nodes using hugepages
+    command: "oc label node {{ item }} cpumanager=true"
+    with_items: "{{ hp_ocp_nodes }}"
+    ignore_errors: true
+
+  - meta: end_play
+
+  - name: Debug find a way to patch machineconfigpool worker
+
+  - name: Apply k8s resources
+    k8s:
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+      validate_certs: "{{ k8s_validate_certs }}"
+      state: present
+      src: "{{ role_path }}/files/{{ item }}"
+    with_items:
+    - hugepages-tuned-boottime.yaml
+    - hugepages-mcp.yaml
+
+  always:
+  - name: If login succeeded, try to log out (revoke access token)
+    when: k8s_auth_results.k8s_auth.api_key is defined
+    k8s_auth:
+      state: absent
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+
+  - name: Logout from oc session
+    command: oc logout
+
+  module_defaults:
+    group/k8s:
+      host: "https://api.{{ cluster_name }}.{{ public_domain }}:6443"
+      validate_certs: "{{ k8s_validate_certs }}"
+
+
