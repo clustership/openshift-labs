@@ -1,0 +1,62 @@
+---
+# tasks file for ocp4-chrony
+- block:
+  - set_fact:
+      found_kubeconfig: "{{ kubeconfig }}"
+    when: kubeconfig is defined and kubeconfig != ''
+
+  - set_fact:
+      found_kubeconfig: "{{ lookup('env', 'K8S_AUTH_KUBECONFIG') | default('', False) }}"
+    when: kubeconfig is undefined
+
+  - name: Log in to OpenShift cluster to get auth token
+    k8s_auth:
+      username: "{{ k8s_username }}"
+      password: "{{ k8s_password }}"
+    register: k8s_auth_results
+    when: k8s_username is defined and k8s_password is defined
+
+
+  - name: Debug k8s auth
+    debug:
+      msg: "{{ k8s_auth_results }}"
+    when: k8s_auth_results is defined
+
+  - name: Login with token for the session
+    command: "oc login --token={{ k8s_auth_results.k8s_auth.api_key }} --server=https://api.{{ cluster_name }}.{{ public_domain }}:6443"
+    when: k8s_auth_results is defined and k8s_auth_results|bool != False
+
+  # Logic comes here
+  - name: Apply chrony machineconfig template
+    k8s:
+      state: present
+      definition: "{{ lookup('template', '{{ role_path }}/templates/nodes-chrony-configuration.yaml.j2') }}"
+    vars:
+      node_type: "{{ item }}"
+    with_items:
+    - master
+    - worker
+
+  always:
+  - name: If login succeeded, try to log out (revoke access token)
+    when: k8s_auth_results.k8s_auth.api_key is defined
+    k8s_auth:
+      state: absent
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+
+  - name: Logout from oc session
+    command: oc logout
+    ignore_errors: true
+
+  module_defaults:
+    group/k8s:
+      host: "https://api.{{ cluster_name }}.{{ public_domain }}:6443"
+      validate_certs: "{{ k8s_validate_certs }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key | default('', False) }}"
+
+    k8s:
+      kubeconfig: "{{ found_kubeconfig }}"
+
+    
+
+

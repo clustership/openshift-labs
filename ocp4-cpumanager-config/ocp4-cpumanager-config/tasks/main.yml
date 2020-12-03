@@ -41,6 +41,8 @@
   - meta: end_play
 
   - name: Debug find a way to patch machineconfigpool worker
+    debug:
+      msg: "oc patch machineconfigpool worker --type='json' -p='[{"op": "add", "path": "/metadata/labels/custom-kubelet", "value": "cpumanager-enabled" }]'"
 
   - name: Apply k8s resources
     k8s:
