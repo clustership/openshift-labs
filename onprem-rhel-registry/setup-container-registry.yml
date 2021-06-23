@@ -1,0 +1,12 @@
+#!/usr/bin/env ansible-playbook
+---
+- name: Setup a onprem container registry
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  environment:
+    PATH: "/usr/bin/:/usr/local/bin/:{{ ansible_env.PATH }}"
+  become: true
+  roles:
+    - role: onprem-rhel-registry
+      tags: registry

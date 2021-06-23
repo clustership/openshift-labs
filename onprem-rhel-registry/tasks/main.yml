@@ -1,0 +1,91 @@
+#!/usr/bin/env ansible-playbook
+---
+- name: Configure single node cluster for OpenRAN
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  environment:
+    PATH: "/usr/bin/:/usr/local/bin/:{{ ansible_env.PATH }}"
+  become: true
+  tasks:
+  - name: Setup required tools
+    yum:
+      name:
+      - podman
+      - httpd-tools
+      state: present
+
+  - name: Create auth directories
+    ansible.builtin.file:
+      path: "/opt/registry/{{ item }}"
+      state: directory
+      mode: '0755'
+    loop:
+    - auth
+    - certs
+    - data
+
+  - name: Change data dir owner
+    ansible.builtin.file:
+      path: /opt/registry/data
+      owner: vagrant
+      mode: '0755'
+
+  - name: Create user credentials
+    command: "htpasswd -bBc /opt/registry/auth/htpasswd xymox bobleponge"
+
+  - name: Generate an OpenSSL private key with the default values (4096 bits, RSA)
+    community.crypto.openssl_privatekey:
+      path: /opt/registry/certs/domain.key
+
+  - name: Generate an OpenSSL Certificate Signing Request
+    community.crypto.openssl_csr:
+      path: /opt/registry/certs/domain.csr
+      privatekey_path: /opt/registry/certs/domain.key
+      common_name: localregistry
+
+  - name: Create tls certificates
+    community.crypto.x509_certificate:
+      path: /opt/registry/certs/domain.crt
+      privatekey_path: /opt/registry/certs/domain.key
+      csr_path: /opt/registry/certs/domain.csr
+      provider: selfsigned
+
+  - name: Change crt and key owner
+    ansible.builtin.file:
+      path: "/opt/registry/certs/{{ item }}"
+      owner: vagrant
+      mode: '0600'
+    loop:
+    - domain.crt
+    - domain.key
+
+  - name: Copy domain.crt to central pki
+    copy:
+      src: /opt/registry/certs/domain.crt
+      dest: /etc/pki/ca-trust/source/anchors/domain.crt
+
+  - name: Update ca trust
+    command: update-ca-trust
+
+  - name: Validate trust list
+    shell: trust list | grep -i "localregistry"
+    register: trust_out
+    failed_when: "trust_out.stdout == ''"
+
+  - name: Run the registry
+    become: false
+    shell: |
+      podman run --name myregistry \
+        -p 5000:5000 \
+        -v /opt/registry/data:/var/lib/registry:z \
+        -v /opt/registry/auth:/auth:z \
+        -e "REGISTRY_AUTH=htpasswd" \
+        -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
+        -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+        -v /opt/registry/certs:/certs:z \
+        -e "REGISTRY_HTTP_TLS_CERTIFICATE=/certs/domain.crt" \
+        -e "REGISTRY_HTTP_TLS_KEY=/certs/domain.key" \
+        -e REGISTRY_COMPATIBILITY_SCHEMA1_ENABLED=true \
+        -d \
+        docker.io/library/registry:latest
