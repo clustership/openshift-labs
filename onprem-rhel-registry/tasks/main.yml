@@ -41,10 +41,10 @@
     command: |
       openssl genrsa -aes256 \
         -passout pass:{{ root_ca_passphrase }} \
-        -out {{certs_dir}}/ca.key \
+        -out {{ certs_dir }}/ca.key \
         2048
     args:
-      creates: "{{certs_dir}}/ca.key"
+      creates: "{{ certs_dir }}/ca.key"
 
   - name: Generate RootCA Cert
     command: |
@@ -62,27 +62,27 @@
 
   - name: Generate an OpenSSL private key with the default values (4096 bits, RSA)
     community.crypto.openssl_privatekey:
-      path: "{{ certs_dir }}/registry.key"
+      path: "{{ certs_dir }}/registry.key"
 
   - name: Generate an OpenSSL Certificate Signing Request
     community.crypto.openssl_csr:
-      path: "{{ certs_dir }}/registry.csr"
+      path: "{{ certs_dir }}/registry.csr"
       privatekey_path: "{{ certs_dir }}/registry.key"
-      common_name: localregistry
+      common_name: "{{ registry_hostname }}"
 
   - name: Create tls certificates
     community.crypto.x509_certificate:
       path: "{{ certs_dir }}/registry.crt"
       privatekey_path: "{{ certs_dir }}/registry.key"
       csr_path: "{{ certs_dir }}/registry.csr"
-      ownca_path: "{{ certs_dir }}/ca.crt"
-      ownca_privatekey_path: "{{ certs_dir }}/ca.key"
+      ownca_path: "{{ certs_dir }}/ca.crt"
+      ownca_privatekey_path: "{{ certs_dir }}/ca.key"
       ownca_privatekey_passphrase: "{{ root_ca_passphrase }}" 
       provider: ownca
 
   - name: Install root ca
     copy:
-      src: "{{certs_dir}}/ca.crt"
+      src: "{{ certs_dir }}/ca.crt"
       dest: /etc/pki/ca-trust/source/anchors/
 
   - name: Update ca trust
@@ -93,7 +93,7 @@
   - name: Change crt and key owner
     ansible.builtin.file:
       path: "{{ certs_dir }}/{{ item }}"
-      owner: "{{ registry_user }}"
+      owner: "{{ registry_user }}"
       mode: '0600'
     loop:
     - registry.crt
@@ -175,7 +175,9 @@
   command: 'firewall-cmd --reload'
 
 - name: Get local registry pod
-  shell: "curl -u xymox:bobleponge -k https://{{ registry_hostname }}/v2/_catalog | grep repositories"
+  shell: "curl -u xymox:bobleponge -k https://{{ registry_hostname }}:5000/v2/_catalog | grep repositories"
+  args:
+    warn: no
   register: pod_state
   until: pod_state.stdout != ""
   retries: 3
