@@ -1,91 +1,182 @@
-#!/usr/bin/env ansible-playbook
 ---
-- name: Configure single node cluster for OpenRAN
-  hosts: localhost
-  connection: local
-  gather_facts: true
-  environment:
-    PATH: "/usr/bin/:/usr/local/bin/:{{ ansible_env.PATH }}"
-  become: true
-  tasks:
-  - name: Setup required tools
-    yum:
-      name:
-      - podman
-      - httpd-tools
-      state: present
+- name: Setup required tools
+  yum:
+    name:
+    - podman
+    - httpd-tools
+    state: present
 
-  - name: Create auth directories
-    ansible.builtin.file:
-      path: "/opt/registry/{{ item }}"
-      state: directory
-      mode: '0755'
-    loop:
-    - auth
-    - certs
-    - data
+- name: Create auth directories
+  ansible.builtin.file:
+    path: "/opt/registry/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+  - auth
+  - certs
+  - data
 
-  - name: Change data dir owner
-    ansible.builtin.file:
-      path: /opt/registry/data
-      owner: vagrant
-      mode: '0755'
+- name: Change data dir owner
+  ansible.builtin.file:
+    path: /opt/registry/data
+    owner: "{{ registry_user }}"
+    mode: '0755'
 
-  - name: Create user credentials
-    command: "htpasswd -bBc /opt/registry/auth/htpasswd xymox bobleponge"
+- name: Create user credentials
+  command: "htpasswd -bBc /opt/registry/auth/htpasswd xymox bobleponge"
+
+- name: Certificates generation block
+  tags:
+  - certs
+  block:
+  - name: Create openssl.root-ca.conf
+    template:
+      dest: "{{ certs_dir }}/{{ item }}"
+      src: "{{ item }}.j2"
+    with_items:
+      - openssl.root-ca.conf
+      - openssl.certificate.conf
+
+  - name: Generate RootCA key
+    command: |
+      openssl genrsa -aes256 \
+        -passout pass:{{ root_ca_passphrase }} \
+        -out {{certs_dir}}/ca.key \
+        2048
+    args:
+      creates: "{{certs_dir}}/ca.key"
+
+  - name: Generate RootCA Cert
+    command: |
+      openssl req \
+        -config {{certs_dir}}/openssl.root-ca.conf \
+        -new -x509 -days 7300 \
+        -key {{certs_dir}}/ca.key \
+        -passin 'pass:{{ root_ca_passphrase }}' \
+        -sha256 \
+        -extensions v3_ca \
+        -batch \
+        -out {{certs_dir}}/ca.crt
+    args:
+      creates:  "{{certs_dir}}/ca.crt"
 
   - name: Generate an OpenSSL private key with the default values (4096 bits, RSA)
     community.crypto.openssl_privatekey:
-      path: /opt/registry/certs/domain.key
+      path: "{{ certs_dir }}/registry.key"
 
   - name: Generate an OpenSSL Certificate Signing Request
     community.crypto.openssl_csr:
-      path: /opt/registry/certs/domain.csr
-      privatekey_path: /opt/registry/certs/domain.key
+      path: "{{ certs_dir }}/registry.csr"
+      privatekey_path: "{{ certs_dir }}/registry.key"
       common_name: localregistry
 
   - name: Create tls certificates
     community.crypto.x509_certificate:
-      path: /opt/registry/certs/domain.crt
-      privatekey_path: /opt/registry/certs/domain.key
-      csr_path: /opt/registry/certs/domain.csr
-      provider: selfsigned
+      path: "{{ certs_dir }}/registry.crt"
+      privatekey_path: "{{ certs_dir }}/registry.key"
+      csr_path: "{{ certs_dir }}/registry.csr"
+      ownca_path: "{{ certs_dir }}/ca.crt"
+      ownca_privatekey_path: "{{ certs_dir }}/ca.key"
+      ownca_privatekey_passphrase: "{{ root_ca_passphrase }}" 
+      provider: ownca
+
+  - name: Install root ca
+    copy:
+      src: "{{certs_dir}}/ca.crt"
+      dest: /etc/pki/ca-trust/source/anchors/
+
+  - name: Update ca trust
+    shell: |
+      update-ca-trust enable;
+      update-ca-trust extract;
 
   - name: Change crt and key owner
     ansible.builtin.file:
-      path: "/opt/registry/certs/{{ item }}"
-      owner: vagrant
+      path: "{{ certs_dir }}/{{ item }}"
+      owner: "{{ registry_user }}"
       mode: '0600'
     loop:
-    - domain.crt
-    - domain.key
+    - registry.crt
+    - registry.key
 
-  - name: Copy domain.crt to central pki
-    copy:
-      src: /opt/registry/certs/domain.crt
-      dest: /etc/pki/ca-trust/source/anchors/domain.crt
+# - name: Copy domain.crt to central pki
+#  copy:
+#    src: {{ certs_dir }}/registry.crt
+#    dest: /etc/pki/ca-trust/source/anchors/domain.crt
 
-  - name: Update ca trust
-    command: update-ca-trust
+# - name: Update ca trust
+#  command: update-ca-trust
 
-  - name: Validate trust list
-    shell: trust list | grep -i "localregistry"
-    register: trust_out
-    failed_when: "trust_out.stdout == ''"
+- name: Validate trust list
+  shell: trust list | grep -i "localregistry"
+  register: trust_out
+  failed_when: "trust_out.stdout == ''"
 
-  - name: Run the registry
-    become: false
-    shell: |
-      podman run --name myregistry \
-        -p 5000:5000 \
+- name: Create podman-registry.service
+  copy:
+    dest: /etc/systemd/system/podman-registry.service
+    content: |
+      [Unit]
+      Description=Mirror registry (podman-registry)
+      After=network.target
+
+      [Service]
+      Type=simple
+      TimeoutStartSec=5m
+
+      ExecStartPre=-/usr/bin/podman rm "podman-registry"
+      ExecStartPre=/usr/bin/podman pull quay.io/redhat-emea-ssa-team/registry:2
+      ExecStart=/usr/bin/podman run --name podman-registry --net host \
         -v /opt/registry/data:/var/lib/registry:z \
         -v /opt/registry/auth:/auth:z \
         -e "REGISTRY_AUTH=htpasswd" \
-        -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
-        -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+        -e "REGISTRY_AUTH_HTPASSWD_REALM=registry-realm" \
+        -e "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd" \
+        -e "REGISTRY_COMPATIBILITY_SCHEMA1_ENABLED=TRUE" \
         -v /opt/registry/certs:/certs:z \
-        -e "REGISTRY_HTTP_TLS_CERTIFICATE=/certs/domain.crt" \
-        -e "REGISTRY_HTTP_TLS_KEY=/certs/domain.key" \
+        -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+        -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
         -e REGISTRY_COMPATIBILITY_SCHEMA1_ENABLED=true \
-        -d \
-        docker.io/library/registry:latest
+        quay.io/redhat-emea-ssa-team/registry:2
+
+      ExecReload=-/usr/bin/podman stop "podman-registry"
+      ExecReload=-/usr/bin/podman rm "podman-registry"
+      ExecStop=-/usr/bin/podman stop "podman-registry"
+      Restart=always
+      RestartSec=30
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Enable podman-registry
+  systemd:
+    name: podman-registry.service
+    enabled: yes
+    state: started
+
+- name: Ensure registry pod is up
+  shell: podman ps | grep podman-registry
+  register: pod_state
+  until: pod_state.stdout != ""
+  retries: 4
+  delay: 15
+
+- name: Allow OpenShift traffic from VM's to Host
+  firewalld:
+    zone: "{{ item }}"
+    state: enabled
+    permanent: yes
+    port: 5000/tcp
+  with_items:
+  - public
+  - internal
+
+- name: reload firewalld
+  command: 'firewall-cmd --reload'
+
+- name: Get local registry pod
+  shell: "curl -u xymox:bobleponge -k https://{{ registry_hostname }}/v2/_catalog | grep repositories"
+  register: pod_state
+  until: pod_state.stdout != ""
+  retries: 3
+  delay: 30

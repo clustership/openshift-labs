@@ -1,2 +1,5 @@
 ---
 # defaults file for onprem-rhel-registry
+registry_user: root
+registry_dir: /opt/registry
+certs_dir: "{{ registry_dir }}/certs"
